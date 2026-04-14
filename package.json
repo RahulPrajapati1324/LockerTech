@@ -1,0 +1,23 @@
+{
+  "name": "video-api",
+  "version": "1.0.0",
+  "description": "LockerTech production-ready video metadata and streaming API",
+  "main": "app.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node app.js",
+    "dev": "node --watch app.js",
+    "check": "node --check app.js && node --check db.js && node --check routes/pickup.js && node --check routes/video.js",
+    "test": "node --test routes/video.test.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "dotenv": "^16.6.1",
+    "express": "^4.22.1",
+    "ffmpeg-static": "^5.3.0",
+    "mssql": "^11.0.1",
+    "nodemon": "^3.1.14"
+  }
+}
