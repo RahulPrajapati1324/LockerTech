@@ -3,6 +3,15 @@ const { spawn } = require('child_process');
 const { poolPromise, sql } = require('../db');
 const FFMPEG_PATH = require('ffmpeg-static');
 
+// Add at the top of routes/video.js
+const jwt = require('jsonwebtoken');
+
+function tokenFromRequest(req) {
+  const header = req.headers['authorization'];
+  if (header) return header.split(' ')[1];
+  return req.query.token || null;
+}
+
 const router = express.Router();
 
 const DB_CHUNK_SIZE = Number(process.env.STREAM_CHUNK_SIZE_BYTES) || 512 * 1024; // 512KB DB read chunks
@@ -253,17 +262,36 @@ async function handleVideoRequest(req, res, forceDownload) {
 }
 
 // Stream endpoint — use directly in <video src="..."> or open in browser
+// router.get('/:invoiceNumber', async (req, res) => {
+//   try {
+//     return await handleVideoRequest(req, res, false);
+//   } catch (error) {
+//     if (error instanceof sql.RequestError) {
+//       console.error('SQL error while streaming video:', error);
+//     } else {
+//       console.error('Server error while streaming video:', error);
+//     }
+//     if (res.headersSent) return undefined;
+//     return res.status(500).json({ error: 'Failed to stream video' });
+//   }
+// });
+
+// REPLACE the existing router.get('/:invoiceNumber') with this:
 router.get('/:invoiceNumber', async (req, res) => {
+  const token = tokenFromRequest(req);
+  if (!token) return res.status(401).json({ error: 'No token' });
+
+  try {
+    jwt.verify(token, process.env.JWT_SECRET);
+  } catch {
+    return res.status(403).json({ error: 'Invalid token' });
+  }
+
   try {
     return await handleVideoRequest(req, res, false);
   } catch (error) {
-    if (error instanceof sql.RequestError) {
-      console.error('SQL error while streaming video:', error);
-    } else {
-      console.error('Server error while streaming video:', error);
-    }
-    if (res.headersSent) return undefined;
-    return res.status(500).json({ error: 'Failed to stream video' });
+    console.error('Video error:', error);
+    if (!res.headersSent) res.status(500).json({ error: 'Failed' });
   }
 });
 
