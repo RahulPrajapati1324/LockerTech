@@ -1,8 +1,13 @@
+//app.js
+
 require('dotenv').config();
 const express = require('express');
 const { poolPromise } = require('./db');
 const pickupRouter = require('./routes/pickup');
 const videoRouter = require('./routes/video');
+
+const authRouter = require('./routes/auth');                
+const authenticate = require('./middleware/authenticate'); 
 
 const app = express();
 const port = Number(process.env.PORT) || 3000;
@@ -42,8 +47,10 @@ app.get('/health/ready', async (_req, res) => {
   }
 });
 
-app.use('/pickup', pickupRouter);
-app.use('/video', videoRouter);
+
+app.use('/auth', authRouter);
+app.use('/pickup', authenticate, pickupRouter);
+app.use('/video', authenticate, videoRouter); 
 
 app.use((err, _req, res, _next) => {
   console.error('Unhandled error', err);

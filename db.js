@@ -1,3 +1,5 @@
+// db.js
+
 const sql = require('mssql');
 
 const requiredEnv = ['DB_SERVER', 'DB_DATABASE', 'DB_USER', 'DB_PASSWORD'];
