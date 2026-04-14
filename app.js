@@ -50,7 +50,7 @@ app.get('/health/ready', async (_req, res) => {
 
 app.use('/auth', authRouter);
 app.use('/pickup', authenticate, pickupRouter);
-app.use('/video', videoRouter); 
+app.use('/video',authenticate, videoRouter); 
 
 app.use((err, _req, res, _next) => {
   console.error('Unhandled error', err);
