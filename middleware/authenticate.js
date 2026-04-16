@@ -1,21 +1,10 @@
-// const jwt = require('jsonwebtoken');
-
-
 // middleware/authenticate.js
 // ─────────────────────────────────────────────────────────────────────────────
-// WHAT CHANGED vs old version:
-//
-//   1. Token type guard — rejects ?vt= video tokens used on protected routes.
-//      Old code accepted ANY valid JWT. Now only tokens with type:"session"
-//      are accepted here. Video tokens (type:"video") are only valid on
-//      the /video route via validateVideoToken() inside routes/video.js.
-//
-//   2. req.user shape is now explicit: { username, storeNumber }
-//      instead of forwarding the entire decoded payload.
-//
-//   3. Minor: cleaner Bearer extraction with optional chaining.
-//
-// Everything else is identical — same 401/403 behaviour, same JWT_SECRET.
+// WHAT CHANGED:
+//   storeNumber is no longer stored in or read from the JWT.
+//   req.user now only carries { username }.
+//   Routes that need storeNumber must look it up from the DB using username.
+//   (See routes/pickup.js and routes/auth.js for the DB lookup helper.)
 // ─────────────────────────────────────────────────────────────────────────────
 'use strict';
 
@@ -37,9 +26,10 @@ function authenticate(req, res, next) {
       return res.status(403).json({ error: 'Invalid token type.' });
     }
 
+    // storeNumber is intentionally NOT stored in the token.
+    // Routes that need it fetch it live from the DB using username.
     req.user = {
-      username:    decoded.username,
-      storeNumber: decoded.storeNumber,
+      username: decoded.username,
     };
 
     return next();
@@ -52,25 +42,3 @@ function authenticate(req, res, next) {
 }
 
 module.exports = authenticate;
-
-// function authenticate(req, res, next) {
-//   const authHeader = req.headers['authorization'];
-//   const token = authHeader && authHeader.split(' ')[1]; // Bearer <token>
-
-//   if (!token) {
-//     return res.status(401).json({ error: 'Access denied. No token provided.' });
-//   }
-
-//   try {
-//     const decoded = jwt.verify(token, process.env.JWT_SECRET);
-//     req.user = decoded;
-//     next();
-//   } catch (error) {
-//     if (error.name === 'TokenExpiredError') {
-//       return res.status(401).json({ error: 'Token has expired. Please log in again.' });
-//     }
-//     return res.status(403).json({ error: 'Invalid token.' });
-//   }
-// }
-
-// module.exports = authenticate;

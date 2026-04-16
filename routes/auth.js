@@ -1,106 +1,39 @@
-// const express = require('express')
-// const jwt = require('jsonwebtoken')
-// const { poolPromise, sql } = require('../db')
-
-// const router = express.Router()
-
-// router.post('/login', async (req, res) => {
-//   const { username, password } = req.body
-
-//   if (!username || !password) {
-//     return res.status(400).json({ error: 'Username and password are required' })
-//   }
-
-//   try {
-//     const pool = await poolPromise
-
-//     const result = await pool
-//       .request()
-//       .input('username', sql.VarChar, username.trim())
-//       .input('password', sql.VarChar, password)
-//       .query(`
-//         SELECT Username, StoreNumber
-//         FROM Vendors
-//         WHERE Username = @username AND Password = @password
-//       `)
-
-//     const vendor = result.recordset[0]
-
-//     if (!vendor) {
-//       return res.status(401).json({ error: 'Invalid username or password' })
-//     }
-
-//     const token = jwt.sign(
-//       { 
-//         username: vendor.Username,
-//         storeNumber: vendor.StoreNumber   // 👈 added to token
-//       },
-//       process.env.JWT_SECRET,
-//       { expiresIn: process.env.JWT_EXPIRES_IN || '8h' }
-//     )
-
-//     return res.status(200).json({
-//       message: 'Login successful',
-//       token,
-//       user: {
-//         username: vendor.Username,
-//         storeNumber: vendor.StoreNumber   // 👈 added to response
-//       }
-//     })
-
-//   } catch (error) {
-//     console.error('Login error:', error)
-//     return res.status(500).json({ error: 'Internal server error' })
-//   }
-// })
-
-// module.exports = router
-
-
-
-
 // routes/auth.js
 // ─────────────────────────────────────────────────────────────────────────────
-// WHAT CHANGED vs old version:
+// WHAT CHANGED (storeNumber removed from token):
 //
-//   POST /auth/login  — same URL, mostly same behaviour, three key differences:
-//     1. Passwords are now compared with bcrypt (not plain-text SQL WHERE).
-//        The SQL query fetches the row by username only, then bcrypt.compare()
-//        checks the password in JS. Run scripts/migrate-passwords.js first.
-//     2. JWT payload now includes  type:"session"  so authenticate middleware
-//        can distinguish session tokens from short-lived video tokens.
-//     3. In-memory rate-limit guard (10 attempts per 15 min per IP).
-//        Tune via LOGIN_MAX_ATTEMPTS and LOGIN_WINDOW_MS env vars.
-//        The "message" field is removed from the success response (breaking
-//        change is intentional — it was never used by the frontend).
+//   POST /auth/login:
+//     - storeNumber is NO LONGER put inside the JWT payload.
+//     - storeNumber IS still returned in the login response body (user:{}) so
+//       the frontend can display it if needed — it's just not in the token.
 //
-//   POST /auth/video-token  ← NEW endpoint (does not replace anything)
-//     Called by the Wix frontend before opening a video in a new tab.
-//     Returns a signed URL with a 20-min token embedded as ?vt=<token>.
-//     The /video route validates this token — no Authorization header needed,
-//     which is required for <video src="..."> and new-tab navigation.
+//   POST /auth/video-token:
+//     - req.user.storeNumber is gone (no longer in session JWT).
+//     - storeNumber is fetched live from Vendors table using req.user.username
+//       before being used to scope the invoice ownership check.
+//     - storeNumber IS still embedded in the short-lived video token (?vt=)
+//       because the /video route needs it to scope its DB query, and that
+//       token is issued fresh each time (20 min TTL) so it's always current.
 //
 // ─────────────────────────────────────────────────────────────────────────────
 'use strict';
 
 const express  = require('express');
 const jwt      = require('jsonwebtoken');
-const bcrypt   = require('bcryptjs');         // NEW dependency — npm install bcryptjs
+const bcrypt   = require('bcryptjs');
 const { poolPromise, sql } = require('../db');
 const authenticate = require('../middleware/authenticate');
 
 const router = express.Router();
 
 // ─── Simple in-memory rate limiter ────────────────────────────────────────
-// Maps IP → { count, resetAt }.  Not shared across processes — swap for
-// a Redis-backed limiter (e.g. rate-limiter-flexible) in a multi-instance setup.
 const loginAttempts = new Map();
 
 function checkRateLimit(ip) {
-  const now         = Date.now();
-  const entry       = loginAttempts.get(ip);
-  const MAX         = Number(process.env.LOGIN_MAX_ATTEMPTS) || 10;
-  const WINDOW_MS   = Number(process.env.LOGIN_WINDOW_MS)    || 15 * 60 * 1000;
+  const now       = Date.now();
+  const entry     = loginAttempts.get(ip);
+  const MAX       = Number(process.env.LOGIN_MAX_ATTEMPTS) || 10;
+  const WINDOW_MS = Number(process.env.LOGIN_WINDOW_MS)    || 15 * 60 * 1000;
 
   if (!entry || now > entry.resetAt) {
     loginAttempts.set(ip, { count: 1, resetAt: now + WINDOW_MS });
@@ -109,6 +42,21 @@ function checkRateLimit(ip) {
   if (entry.count >= MAX) return true;
   entry.count++;
   return false;
+}
+
+// ─── Helper: fetch storeNumber from DB by username ────────────────────────
+// Used by /video-token because storeNumber is no longer in the session JWT.
+async function getStoreNumber(username) {
+  const pool = await poolPromise;
+  const result = await pool
+    .request()
+    .input('username', sql.VarChar(100), username)
+    .query(`
+      SELECT StoreNumber
+      FROM   Vendors
+      WHERE  Username = @username
+    `);
+  return result.recordset[0]?.StoreNumber ?? null;
 }
 
 // ─── POST /auth/login ──────────────────────────────────────────────────────
@@ -132,7 +80,6 @@ router.post('/login', async (req, res) => {
   try {
     const pool = await poolPromise;
 
-    // Fetch row by username only — password comparison is done in JS via bcrypt
     const result = await pool
       .request()
       .input('username', sql.VarChar(100), username.trim().toLowerCase())
@@ -144,8 +91,6 @@ router.post('/login', async (req, res) => {
 
     const vendor = result.recordset[0];
 
-    // Always run bcrypt even when the user doesn't exist — prevents timing-based
-    // username enumeration (attacker can't tell "no such user" from "wrong password").
     const hash          = vendor?.Password ?? '$2b$12$invalidhashfortimingprotection';
     const passwordMatch = await bcrypt.compare(password, hash);
 
@@ -153,25 +98,24 @@ router.post('/login', async (req, res) => {
       return res.status(401).json({ error: 'Invalid username or password' });
     }
 
-    // Issue session JWT — type:"session" lets authenticate() reject video tokens
+    // storeNumber intentionally excluded from JWT payload
     const token = jwt.sign(
       {
-        type:        'session',
-        username:    vendor.Username,
-        storeNumber: vendor.StoreNumber,
+        type:     'session',
+        username: vendor.Username,
+        // storeNumber removed — fetched from DB when needed
       },
       process.env.JWT_SECRET,
       { expiresIn: process.env.JWT_EXPIRES_IN || '8h' }
     );
 
-    // Clear rate-limit counter on successful login
     loginAttempts.delete(ip);
 
     return res.status(200).json({
       token,
       user: {
         username:    vendor.Username,
-        storeNumber: vendor.StoreNumber,
+        storeNumber: vendor.StoreNumber, // still in response body, just not in token
       },
     });
 
@@ -181,19 +125,7 @@ router.post('/login', async (req, res) => {
   }
 });
 
-// ─── POST /auth/video-token  (NEW) ────────────────────────────────────────
-// Call this BEFORE opening a video URL in a new browser tab or setting
-// <video src="...">.  Browsers cannot attach Authorization headers for either
-// of those cases, so the /video route accepts a short-lived ?vt= query param
-// instead of a header.
-//
-// Request:   POST /auth/video-token
-//            Authorization: Bearer <sessionJWT>
-//            Body: { "invoiceNumber": "INV-12345" }
-//
-// Response:  { "videoUrl": "https://yourapi.com/video/INV-12345?vt=<token>" }
-//
-// The token expires in 20 minutes (configurable via VIDEO_TOKEN_EXPIRES_IN).
+// ─── POST /auth/video-token ────────────────────────────────────────────────
 router.post('/video-token', authenticate, async (req, res) => {
   const { invoiceNumber } = req.body;
 
@@ -202,13 +134,19 @@ router.post('/video-token', authenticate, async (req, res) => {
   }
 
   try {
+    // storeNumber no longer in session JWT — fetch fresh from DB using username
+    const storeNumber = await getStoreNumber(req.user.username);
+    if (!storeNumber) {
+      return res.status(403).json({ error: 'Vendor not found.' });
+    }
+
     const pool = await poolPromise;
 
-    // Confirm this invoice belongs to the vendor's own store before issuing token
+    // Confirm this invoice belongs to the vendor's store
     const result = await pool
       .request()
       .input('invoiceNumber', sql.VarChar(50), invoiceNumber.trim())
-      .input('storeNumber',   sql.VarChar(20), req.user.storeNumber)
+      .input('storeNumber',   sql.VarChar(20), storeNumber)
       .query(`
         SELECT TOP 1 InvoiceNumber
         FROM   PickUpConfirmationInfo
@@ -220,11 +158,14 @@ router.post('/video-token', authenticate, async (req, res) => {
       return res.status(404).json({ error: 'Video not found for your store.' });
     }
 
+    // Short-lived video token still carries storeNumber (fetched above).
+    // The /video route needs it to scope its DB query, and this token is
+    // issued fresh each time (20 min TTL) so it always reflects current DB state.
     const videoToken = jwt.sign(
       {
         type:          'video',
         invoiceNumber: invoiceNumber.trim(),
-        storeNumber:   req.user.storeNumber,
+        storeNumber:   storeNumber,
         username:      req.user.username,
       },
       process.env.JWT_SECRET,
