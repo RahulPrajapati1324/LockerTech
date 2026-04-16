@@ -115,7 +115,7 @@ router.post('/login', async (req, res) => {
       token,
       user: {
         username:    vendor.Username,
-        storeNumber: vendor.StoreNumber, // still in response body, just not in token
+        // storeNumber: vendor.StoreNumber, // still in response body, just not in token
       },
     });
 
