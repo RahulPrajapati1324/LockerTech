@@ -1,14 +1,5 @@
 // routes/pickup.js
-// ─────────────────────────────────────────────────────────────────────────────
-// WHAT CHANGED (storeNumber removed from session token):
-//
-//   req.user.storeNumber is no longer available (not in JWT).
-//   Both routes now fetch storeNumber from the Vendors table using
-//   req.user.username at the start of each request.
-//
-//   Everything else — pagination, columns returned, scoping to last 60 days,
-//   the GET /:entryNumber route — is identical.
-// ─────────────────────────────────────────────────────────────────────────────
+
 'use strict';
 
 const express = require('express');
@@ -19,6 +10,7 @@ const router = express.Router();
 const DEFAULT_PAGE      = 1;
 const DEFAULT_PAGE_SIZE = 50;
 const MAX_PAGE_SIZE     = 200;
+const DEFAULT_DAYS      = 60;
 
 function parsePositiveInt(value, fallback) {
   if (value === undefined || value === null) return fallback;
@@ -40,6 +32,25 @@ async function getStoreNumber(username) {
   return result.recordset[0]?.StoreNumber ?? null;
 }
 
+// ─── Helper: parse & validate the `days` query param ─────────────────────
+function parseDays(rawDays) {
+  if (rawDays === undefined || rawDays === null) {
+    return { days: DEFAULT_DAYS, error: null };
+  }
+ 
+  const n = Number.parseInt(rawDays, 10);
+ 
+  if (Number.isNaN(n) || n <= 0) {
+    return {
+      days: null,
+      error: "'days' must be a positive integer (e.g. 30, 60, 90)",
+    };
+  }
+ 
+  return { days: n, error: null };
+}
+ 
+
 // ─── GET /pickup ──────────────────────────────────────────────────────────
 router.get('/', async (req, res) => {
   const page          = parsePositiveInt(req.query.page, DEFAULT_PAGE);
@@ -49,11 +60,15 @@ router.get('/', async (req, res) => {
     return res.status(400).json({ error: 'page and pageSize must be positive integers' });
   }
 
+  const { days, error: daysError } = parseDays(req.query.days);
+  if (daysError) {
+    return res.status(400).json({ error: daysError });
+  }
+
   const pageSize = Math.min(requestedSize, MAX_PAGE_SIZE);
   const offset   = (page - 1) * pageSize;
 
   try {
-    // storeNumber not in JWT — fetch from DB using username
     const storeNumber = await getStoreNumber(req.user.username);
     if (!storeNumber) {
       return res.status(403).json({ error: 'Vendor not found.' });
@@ -65,6 +80,7 @@ router.get('/', async (req, res) => {
       pool
         .request()
         .input('storeNumber', sql.VarChar(20), storeNumber)
+        .input('days',        sql.Int,         days) 
         .input('offset',      sql.Int,         offset)
         .input('pageSize',    sql.Int,         pageSize)
         .query(`
@@ -79,7 +95,7 @@ router.get('/', async (req, res) => {
             CreatedAt
           FROM PickUpConfirmationInfo
           WHERE StoreNumber = @storeNumber
-            AND CreatedAt  >= DATEADD(DAY, -60, GETUTCDATE())
+            AND CreatedAt  >= DATEADD(DAY, -@days, GETUTCDATE())
           ORDER BY CreatedAt DESC, EntryNumber DESC
           OFFSET @offset ROWS
           FETCH NEXT @pageSize ROWS ONLY
@@ -88,11 +104,12 @@ router.get('/', async (req, res) => {
       pool
         .request()
         .input('storeNumber', sql.VarChar(20), storeNumber)
+        .input('days',        sql.Int,         days) 
         .query(`
           SELECT COUNT(1) AS TotalCount
           FROM   PickUpConfirmationInfo
           WHERE  StoreNumber = @storeNumber
-            AND  CreatedAt  >= DATEADD(DAY, -60, GETUTCDATE())
+            AND  CreatedAt  >= DATEADD(DAY, -@days, GETUTCDATE())
         `),
     ]);
 
@@ -114,6 +131,7 @@ router.get('/', async (req, res) => {
 
     return res.status(200).json({
       storeNumber,
+      filter: { days },
       items,
       pagination: {
         page,
@@ -128,66 +146,6 @@ router.get('/', async (req, res) => {
   } catch (error) {
     console.error('Server error while listing pickup records', error);
     return res.status(500).json({ error: 'Failed to fetch pickup list' });
-  }
-});
-
-// ─── GET /pickup/:entryNumber ─────────────────────────────────────────────
-router.get('/:entryNumber', async (req, res) => {
-  const entryNumber = Number.parseInt(req.params.entryNumber, 10);
-  if (Number.isNaN(entryNumber)) {
-    return res.status(400).json({ error: 'Invalid entryNumber.' });
-  }
-
-  try {
-    // storeNumber not in JWT — fetch from DB using username
-    const storeNumber = await getStoreNumber(req.user.username);
-    if (!storeNumber) {
-      return res.status(403).json({ error: 'Vendor not found.' });
-    }
-
-    const pool = await poolPromise;
-
-    const result = await pool
-      .request()
-      .input('entryNumber',  sql.Int,         entryNumber)
-      .input('storeNumber',  sql.VarChar(20), storeNumber)
-      .query(`
-        SELECT
-          EntryNumber,
-          InvoiceNumber,
-          StoreNumber,
-          EmployeeID,
-          ShelfLocation,
-          VideoName,
-          emailed,
-          CreatedAt
-        FROM PickUpConfirmationInfo
-        WHERE EntryNumber = @entryNumber
-          AND StoreNumber = @storeNumber
-      `);
-
-    const row = result.recordset[0];
-    if (!row) {
-      return res.status(404).json({ error: 'Record not found.' });
-    }
-
-    const host = process.env.API_BASE_URL || `${req.protocol}://${req.get('host')}`;
-
-    return res.status(200).json({
-      entryNumber:        row.EntryNumber,
-      invoiceNumber:      row.InvoiceNumber,
-      storeNumber:        row.StoreNumber,
-      employeeID:         row.EmployeeID,
-      shelfLocation:      row.ShelfLocation,
-      videoName:          row.VideoName,
-      emailed:            row.emailed,
-      createdAt:          row.CreatedAt,
-      videoTokenEndpoint: `${host}/auth/video-token`,
-    });
-
-  } catch (err) {
-    console.error('[pickup/single] Error:', err.message);
-    return res.status(500).json({ error: 'Failed to fetch record.' });
   }
 });
 

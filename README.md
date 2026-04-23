@@ -15,11 +15,6 @@ Production-ready Node.js + Express API for listing pickup metadata and streaming
 3. Set all DB variables in `.env` (`DB_SERVER`, `DB_DATABASE`, `DB_USER`, `DB_PASSWORD`).
 
 
-Environment values for the provided LockerTech SQL instance:
-- `DB_SERVER=lockertech-prod-db.database.windows.net`
-- `DB_DATABASE=LockerTech`
-- `DB_USER=Lockertech-db`
-
 4. Start API:
    ```bash
    npm start
