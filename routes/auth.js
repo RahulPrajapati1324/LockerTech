@@ -1,21 +1,5 @@
 // routes/auth.js
 // ─────────────────────────────────────────────────────────────────────────────
-// WHAT CHANGED (storeNumber removed from token):
-//
-//   POST /auth/login:
-//     - storeNumber is NO LONGER put inside the JWT payload.
-//     - storeNumber IS still returned in the login response body (user:{}) so
-//       the frontend can display it if needed — it's just not in the token.
-//
-//   POST /auth/video-token:
-//     - req.user.storeNumber is gone (no longer in session JWT).
-//     - storeNumber is fetched live from Vendors table using req.user.username
-//       before being used to scope the invoice ownership check.
-//     - storeNumber IS still embedded in the short-lived video token (?vt=)
-//       because the /video route needs it to scope its DB query, and that
-//       token is issued fresh each time (20 min TTL) so it's always current.
-//
-// ─────────────────────────────────────────────────────────────────────────────
 'use strict';
 
 const express  = require('express');
@@ -28,6 +12,13 @@ const router = express.Router();
 
 // ─── Simple in-memory rate limiter ────────────────────────────────────────
 const loginAttempts = new Map();
+
+setInterval(() => {
+  const now = Date.now();
+  for (const [ip, entry] of loginAttempts.entries()) {
+    if (now > entry.resetAt) loginAttempts.delete(ip);
+  }
+}, 30 * 60 * 1000).unref();
 
 function checkRateLimit(ip) {
   const now       = Date.now();
@@ -45,7 +36,6 @@ function checkRateLimit(ip) {
 }
 
 // ─── Helper: fetch storeNumber from DB by username ────────────────────────
-// Used by /video-token because storeNumber is no longer in the session JWT.
 async function getStoreNumber(username) {
   const pool = await poolPromise;
   const result = await pool
@@ -98,12 +88,10 @@ router.post('/login', async (req, res) => {
       return res.status(401).json({ error: 'Invalid username or password' });
     }
 
-    // storeNumber intentionally excluded from JWT payload
     const token = jwt.sign(
       {
         type:     'session',
         username: vendor.Username,
-        // storeNumber removed — fetched from DB when needed
       },
       process.env.JWT_SECRET,
       { expiresIn: process.env.JWT_EXPIRES_IN || '8h' }
@@ -115,7 +103,6 @@ router.post('/login', async (req, res) => {
       token,
       user: {
         username:    vendor.Username,
-        // storeNumber: vendor.StoreNumber, // still in response body, just not in token
       },
     });
 
@@ -134,7 +121,6 @@ router.post('/video-token', authenticate, async (req, res) => {
   }
 
   try {
-    // storeNumber no longer in session JWT — fetch fresh from DB using username
     const storeNumber = await getStoreNumber(req.user.username);
     if (!storeNumber) {
       return res.status(403).json({ error: 'Vendor not found.' });
@@ -158,9 +144,6 @@ router.post('/video-token', authenticate, async (req, res) => {
       return res.status(404).json({ error: 'Video not found for your store.' });
     }
 
-    // Short-lived video token still carries storeNumber (fetched above).
-    // The /video route needs it to scope its DB query, and this token is
-    // issued fresh each time (20 min TTL) so it always reflects current DB state.
     const videoToken = jwt.sign(
       {
         type:          'video',
