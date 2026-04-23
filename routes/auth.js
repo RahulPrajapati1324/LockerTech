@@ -1,74 +1,75 @@
 // routes/auth.js
 // ─────────────────────────────────────────────────────────────────────────────
-'use strict';
+'use strict'
 
-const express  = require('express');
-const jwt      = require('jsonwebtoken');
-const bcrypt   = require('bcryptjs');
-const { poolPromise, sql } = require('../db');
-const authenticate = require('../middleware/authenticate');
+const express = require('express')
+const jwt = require('jsonwebtoken')
+const bcrypt = require('bcryptjs')
+const { poolPromise, sql } = require('../db')
+const authenticate = require('../middleware/authenticate')
 
-const router = express.Router();
+const router = express.Router()
 
 // ─── Simple in-memory rate limiter ────────────────────────────────────────
-const loginAttempts = new Map();
+const loginAttempts = new Map()
 
 setInterval(() => {
-  const now = Date.now();
+  const now = Date.now()
   for (const [ip, entry] of loginAttempts.entries()) {
-    if (now > entry.resetAt) loginAttempts.delete(ip);
+    if (now > entry.resetAt) loginAttempts.delete(ip)
   }
-}, 30 * 60 * 1000).unref();
+}, 30 * 60 * 1000).unref()
 
-function checkRateLimit(ip) {
-  const now       = Date.now();
-  const entry     = loginAttempts.get(ip);
-  const MAX       = Number(process.env.LOGIN_MAX_ATTEMPTS) || 10;
-  const WINDOW_MS = Number(process.env.LOGIN_WINDOW_MS)    || 15 * 60 * 1000;
+function checkRateLimit (ip) {
+  const now = Date.now()
+  const entry = loginAttempts.get(ip)
+  const MAX = Number(process.env.LOGIN_MAX_ATTEMPTS) || 10
+  const WINDOW_MS = Number(process.env.LOGIN_WINDOW_MS) || 15 * 60 * 1000
 
   if (!entry || now > entry.resetAt) {
-    loginAttempts.set(ip, { count: 1, resetAt: now + WINDOW_MS });
-    return false;
+    loginAttempts.set(ip, { count: 1, resetAt: now + WINDOW_MS })
+    return false
   }
-  if (entry.count >= MAX) return true;
-  entry.count++;
-  return false;
+  if (entry.count >= MAX) return true
+  entry.count++
+  return false
 }
 
 // ─── Helper: fetch storeNumber from DB by username ────────────────────────
-async function getStoreNumber(username) {
-  const pool = await poolPromise;
+async function getStoreNumber (username) {
+  const pool = await poolPromise
   const result = await pool
     .request()
-    .input('username', sql.VarChar(100), username)
-    .query(`
+    .input('username', sql.VarChar(100), username).query(`
       SELECT StoreNumber
       FROM   Vendors
       WHERE  Username = @username
-    `);
-  return result.recordset[0]?.StoreNumber ?? null;
+    `)
+  return result.recordset[0]?.StoreNumber ?? null
 }
 
 // ─── POST /auth/login ──────────────────────────────────────────────────────
 router.post('/login', async (req, res) => {
-  const ip = req.ip;
+  const ip = req.ip
 
   if (checkRateLimit(ip)) {
-    return res.status(429).json({ error: 'Too many login attempts. Try again later.' });
+    return res
+      .status(429)
+      .json({ error: 'Too many login attempts. Try again later.' })
   }
 
-  const { username, password } = req.body;
+  const { username, password } = req.body
 
   if (!username || !password) {
-    return res.status(400).json({ error: 'Username and password are required' });
+    return res.status(400).json({ error: 'Username and password are required' })
   }
 
   if (typeof username !== 'string' || typeof password !== 'string') {
-    return res.status(400).json({ error: 'Invalid input types.' });
+    return res.status(400).json({ error: 'Invalid input types.' })
   }
 
   try {
-    const pool = await poolPromise;
+    const pool = await poolPromise
 
     const result = await pool
       .request()
@@ -77,93 +78,93 @@ router.post('/login', async (req, res) => {
         SELECT VendorID, Username, Password, StoreNumber
         FROM   Vendors
         WHERE  Username = @username
-      `);
+      `)
 
-    const vendor = result.recordset[0];
+    const vendor = result.recordset[0]
 
-    const hash          = vendor?.Password ?? '$2b$12$invalidhashfortimingprotection';
-    const passwordMatch = await bcrypt.compare(password, hash);
+    const hash = vendor?.Password ?? '$2b$12$invalidhashfortimingprotection'
+    const passwordMatch = await bcrypt.compare(password, hash)
 
     if (!vendor || !passwordMatch) {
-      return res.status(401).json({ error: 'Invalid username or password' });
+      return res.status(401).json({ error: 'Invalid username or password' })
     }
 
     const token = jwt.sign(
       {
-        type:     'session',
-        username: vendor.Username,
+        type: 'session',
+        username: vendor.Username
       },
       process.env.JWT_SECRET,
       { expiresIn: process.env.JWT_EXPIRES_IN || '8h' }
-    );
+    )
 
-    loginAttempts.delete(ip);
+    loginAttempts.delete(ip)
 
     return res.status(200).json({
       token,
       user: {
-        username:    vendor.Username,
-      },
-    });
-
+        username: vendor.Username
+      }
+    })
   } catch (err) {
-    console.error('[auth/login] Error:', err.message);
-    return res.status(500).json({ error: 'Internal server error' });
+    console.error('[auth/login] Error:', err.message)
+    return res.status(500).json({ error: 'Internal server error' })
   }
-});
+})
 
 // ─── POST /auth/video-token ────────────────────────────────────────────────
 router.post('/video-token', authenticate, async (req, res) => {
-  const { invoiceNumber } = req.body;
+  const { invoiceNumber } = req.body
 
   if (!invoiceNumber || typeof invoiceNumber !== 'string') {
-    return res.status(400).json({ error: 'invoiceNumber is required.' });
+    return res.status(400).json({ error: 'invoiceNumber is required.' })
   }
 
   try {
-    const storeNumber = await getStoreNumber(req.user.username);
+    const storeNumber = await getStoreNumber(req.user.username)
     if (!storeNumber) {
-      return res.status(403).json({ error: 'Vendor not found.' });
+      return res.status(403).json({ error: 'Vendor not found.' })
     }
 
-    const pool = await poolPromise;
+    const pool = await poolPromise
 
     // Confirm this invoice belongs to the vendor's store
     const result = await pool
       .request()
       .input('invoiceNumber', sql.VarChar(50), invoiceNumber.trim())
-      .input('storeNumber',   sql.VarChar(20), storeNumber)
-      .query(`
+      .input('storeNumber', sql.VarChar(20), storeNumber).query(`
         SELECT TOP 1 InvoiceNumber
         FROM   PickUpConfirmationInfo
         WHERE  InvoiceNumber = @invoiceNumber
           AND  StoreNumber   = @storeNumber
-      `);
+      `)
 
     if (!result.recordset[0]) {
-      return res.status(404).json({ error: 'Video not found for your store.' });
+      return res.status(404).json({ error: 'Video not found for your store.' })
     }
 
     const videoToken = jwt.sign(
       {
-        type:          'video',
+        type: 'video',
         invoiceNumber: invoiceNumber.trim(),
-        storeNumber:   storeNumber,
-        username:      req.user.username,
+        storeNumber: storeNumber,
+        username: req.user.username
       },
       process.env.JWT_SECRET,
       { expiresIn: process.env.VIDEO_TOKEN_EXPIRES_IN || '20m' }
-    );
+    )
 
-    const host     = process.env.API_BASE_URL || `${req.protocol}://${req.get('host')}`;
-    const videoUrl = `${host}/video/${encodeURIComponent(invoiceNumber.trim())}?vt=${videoToken}`;
+    const host =
+      process.env.API_BASE_URL || `${req.protocol}://${req.get('host')}`
+    const videoUrl = `${host}/video/${encodeURIComponent(
+      invoiceNumber.trim()
+    )}?vt=${videoToken}`
 
-    return res.status(200).json({ videoUrl });
-
+    return res.status(200).json({ videoUrl })
   } catch (err) {
-    console.error('[auth/video-token] Error:', err.message);
-    return res.status(500).json({ error: 'Internal server error' });
+    console.error('[auth/video-token] Error:', err.message)
+    return res.status(500).json({ error: 'Internal server error' })
   }
-});
+})
 
-module.exports = router;
+module.exports = router

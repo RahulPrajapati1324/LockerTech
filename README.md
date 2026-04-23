@@ -1,6 +1,6 @@
 # video-api
 
-Production-ready Node.js + Express API for listing pickup metadata and streaming video blobs from Microsoft SQL Server.
+Production-ready Node.js + Express API for listing vendor pickup records and streaming video blobs from Microsoft SQL Server.
 
 ## Setup
 
@@ -8,14 +8,15 @@ Production-ready Node.js + Express API for listing pickup metadata and streaming
    ```bash
    npm install
    ```
-2. Copy env file:
-   ```bash
-   cp .env.example .env
+2. Create your `.env` file and set all required variables:
+   ```env
+   DB_SERVER=
+   DB_DATABASE=
+   DB_USER=
+   DB_PASSWORD=
+   JWT_SECRET=
    ```
-3. Set all DB variables in `.env` (`DB_SERVER`, `DB_DATABASE`, `DB_USER`, `DB_PASSWORD`).
-
-
-4. Start API:
+3. Start the API:
    ```bash
    npm start
    ```
@@ -23,58 +24,90 @@ Production-ready Node.js + Express API for listing pickup metadata and streaming
 ## Endpoints
 
 ### `GET /health`
-Liveness endpoint for quick service checks.
+Liveness check — returns `{ "status": "ok" }`.
 
-### `GET /health/ready`
-Readiness endpoint that verifies SQL connectivity (`200` when ready, `503` otherwise).
+### `POST /auth/login`
+Authenticates a vendor and returns a session JWT (8h by default).
 
-### `GET /pickup/list`
-Returns pickup metadata with dynamically generated `videoUrl` values (no video blob in response).
+Request body:
+```json
+{ "username": "vendor1", "password": "secret" }
+```
+
+Response:
+```json
+{ "token": "<jwt>", "user": { "username": "vendor1" } }
+```
+
+### `POST /auth/video-token`
+Requires session token. Returns a short-lived signed URL (20 min) for a specific video.
+
+Request body:
+```json
+{ "invoiceNumber": "INV-12345" }
+```
+
+Response:
+```json
+{ "videoUrl": "https://your-api.com/video/INV-12345?vt=<video_token>" }
+```
+
+### `GET /pickup`
+Requires session token. Returns paginated pickup confirmation records for the authenticated vendor's store.
 
 Pagination query params:
 - `page` (default `1`)
 - `pageSize` (default `50`, max `200`)
+- `days` (default `60`) — look-back window
 
 Response shape:
-- `items`: paginated records
+- `items`: paginated records, each including a `videoTokenEndpoint` field
 - `pagination`: `{ page, pageSize, total, totalPages, hasNextPage, hasPreviousPage }`
 
-### `GET /video/:invoiceNumber`
-Streams video blob with HTTP range support for HTML5 player seeking.
-
-### `GET /video/:invoiceNumber/download`
-Optional download endpoint with `Content-Disposition: attachment`.
+### `GET /video/:invoiceNumber?vt=<video_token>`
+Streams the video for the given invoice as fragmented MP4. Token must be obtained from `/auth/video-token` first and is validated against the specific invoice.
 
 ## Example requests
 
-List metadata:
+Login:
 ```bash
-curl "http://localhost:3000/pickup/list?page=1&pageSize=50"
+curl -X POST http://localhost:3000/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"username":"vendor1","password":"secret"}'
 ```
 
-Stream first chunk with a range request:
+List pickup records:
 ```bash
-curl -i \
-  -H "Range: bytes=0-1048575" \
-  http://localhost:3000/video/INV-1001
+curl "http://localhost:3000/pickup?page=1&pageSize=50" \
+  -H "Authorization: Bearer <session_token>"
+```
+
+Get a video URL:
+```bash
+curl -X POST http://localhost:3000/auth/video-token \
+  -H "Authorization: Bearer <session_token>" \
+  -H "Content-Type: application/json" \
+  -d '{"invoiceNumber":"INV-12345"}'
 ```
 
 Inline frontend usage:
 ```html
-<video controls src="http://localhost:3000/video/INV-1001"></video>
+<video controls src="http://localhost:3000/video/INV-12345?vt=<video_token>"></video>
 ```
 
-## Streaming memory optimization
+## Auth & security
 
-- Video is streamed in DB-backed chunks (default `1MB`) using SQL `SUBSTRING(...)` to avoid loading full blobs into Node memory.
-- Configure chunk size via `STREAM_CHUNK_SIZE_BYTES`.
-- Works for both normal streaming and download endpoint while preserving HTTP range behavior.
+- Login is rate-limited per IP (default: 10 attempts per 15 min, configurable via `LOGIN_MAX_ATTEMPTS` and `LOGIN_WINDOW_MS`).
+- Session tokens and video tokens are separate JWT types — a video token cannot be used to access the pickup list or generate new tokens.
+- Video tokens are scoped to a specific invoice and store, preventing reuse across resources.
+- Passwords are stored as bcrypt hashes. Run the one-time migration script if upgrading from plain-text passwords:
+  ```bash
+  node scripts/migrate-passwords.js
+  ```
 
-- Video endpoint sets `Content-Type` to `video/mp4` for broad player compatibility.
+## Video streaming
 
-- Video endpoint streams directly from SQL in fixed-size chunks without caching full files in memory or on disk.
-
-- CORS headers are enabled (`Access-Control-Allow-Origin: *`) and range headers are exposed so HTML `<video>` and third-party players can stream cross-origin.
-
-- If source video is not MP4, endpoint attempts live-transcode to MP4 via `ffmpeg`; if ffmpeg is unavailable it still responds with MP4 headers to preserve browser inline behavior.
-- If `ffmpeg` is unavailable at runtime, endpoint falls back to direct source-format streaming instead of crashing.
+- Video blobs are read from SQL in fixed-size chunks (`STREAM_CHUNK_SIZE_BYTES`, default `4MB`) using `SUBSTRING(...)` — full blobs are never loaded into Node memory.
+- Chunks are piped directly into `ffmpeg` stdin and transcoded on-the-fly to fragmented MP4 (`frag_keyframe+empty_moov`) for broad browser compatibility.
+- ffmpeg path is configurable via `FFMPEG_PATH` (defaults to system `ffmpeg`).
+- Fragment size is configurable via `MP4_FRAG_SIZE_BYTES` (default `256KB`).
